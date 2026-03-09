@@ -154,6 +154,17 @@ def index():
         anio_actual=datetime.now().year
     )
 
+@app.route("/test")
+def test():
+    import traceback
+    try:
+        conn = get_db()
+        result = conn.run("SELECT version()")
+        conn.close()
+        return jsonify({"status": "ok", "db": str(result)})
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e), "trace": traceback.format_exc()})
+
 @app.route("/marcas")
 def marcas():
     return jsonify(cargar_marcas_modelos())
@@ -256,7 +267,11 @@ def consulta():
         except Exception as e:
             yield "data: " + json.dumps({"tipo":"error","texto":str(e)}) + "\n\n"
 
-    return Response(stream_with_context(generar()), mimetype="text/event-stream")
+    try:
+        return Response(stream_with_context(generar()), mimetype="text/event-stream")
+    except Exception as e:
+        import traceback
+        return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
 
 if __name__ == "__main__":
     app.run(debug=True)
