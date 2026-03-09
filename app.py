@@ -1,57 +1,126 @@
 from flask import Flask, render_template, request, jsonify, Response, stream_with_context
-import requests, zipfile, io, os, json, re
+import requests, zipfile, io, os, json
 from collections import defaultdict
 from datetime import datetime
-import pg8000.native
 
 app = Flask(__name__)
 
-DATABASE_URL = os.environ.get("DATABASE_URL")
+# ── Supabase REST API ─────────────────────────────────────────────────────────
+SUPABASE_URL    = os.environ.get("SUPABASE_URL")     # https://xxxx.supabase.co
+SUPABASE_KEY    = os.environ.get("SUPABASE_KEY")     # anon public key
 
-def get_db():
-    m = re.match(r"postgresql://([^:]+):([^@]+)@([^:/]+):(\d+)/(.+)", DATABASE_URL)
-    user, password, host, port, database = m.groups()
-    return pg8000.native.Connection(
-        user=user, password=password, host=host,
-        port=int(port), database=database, ssl_context=True
-    )
+def sb_headers():
+    return {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+        "Prefer": "return=minimal"
+    }
+
+def sb_get(table, params=None):
+    r = requests.get(f"{SUPABASE_URL}/rest/v1/{table}",
+                     headers=sb_headers(), params=params, timeout=30)
+    r.raise_for_status()
+    return r.json()
+
+def sb_post(table, data):
+    r = requests.post(f"{SUPABASE_URL}/rest/v1/{table}",
+                      headers=sb_headers(), json=data, timeout=60)
+    r.raise_for_status()
+
+def sb_rpc(func, params):
+    r = requests.post(f"{SUPABASE_URL}/rest/v1/rpc/{func}",
+                      headers={**sb_headers(), "Prefer": ""},
+                      json=params, timeout=30)
+    r.raise_for_status()
+    return r.json()
 
 def init_db():
-    conn = get_db()
-    conn.run("""
-        CREATE TABLE IF NOT EXISTS matriculaciones (
-            id SERIAL PRIMARY KEY,
-            anio INTEGER, mes INTEGER,
-            marca TEXT, modelo TEXT, tipo TEXT,
-            propulsion TEXT, cilindrada INTEGER,
-            ciudad TEXT, provincia TEXT,
-            persona TEXT, renting TEXT
-        )
-    """)
-    conn.run("CREATE INDEX IF NOT EXISTS idx_marca ON matriculaciones(marca)")
-    conn.run("CREATE INDEX IF NOT EXISTS idx_anio_mes ON matriculaciones(anio, mes)")
-    conn.close()
+    # Crear tabla via SQL usando la API de Supabase
+    sql = """
+    CREATE TABLE IF NOT EXISTS matriculaciones (
+        id BIGSERIAL PRIMARY KEY,
+        anio INTEGER, mes INTEGER,
+        marca TEXT, modelo TEXT, tipo TEXT,
+        propulsion TEXT, cilindrada INTEGER,
+        ciudad TEXT, provincia TEXT,
+        persona TEXT, renting TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_marca ON matriculaciones(marca);
+    CREATE INDEX IF NOT EXISTS idx_anio_mes ON matriculaciones(anio, mes);
+    """
+    # Intentar via RPC exec_sql si existe, sino ignorar
+    try:
+        requests.post(f"{SUPABASE_URL}/rest/v1/rpc/exec_sql",
+                      headers=sb_headers(), json={"sql": sql}, timeout=10)
+    except Exception:
+        pass
 
 def mes_ya_cargado(anio, mes):
-    conn = get_db()
-    result = conn.run("SELECT COUNT(*) FROM matriculaciones WHERE anio=:a AND mes=:m", a=anio, m=mes)
-    conn.close()
-    return result[0][0] > 0
+    r = requests.get(
+        f"{SUPABASE_URL}/rest/v1/matriculaciones",
+        headers={**sb_headers(), "Prefer": "count=exact"},
+        params={"anio": f"eq.{anio}", "mes": f"eq.{mes}", "select": "id", "limit": "1"},
+        timeout=15
+    )
+    count = int(r.headers.get("Content-Range", "0/0").split("/")[-1])
+    return count > 0
 
 def guardar_registros(registros):
     if not registros:
         return
-    conn = get_db()
-    for r in registros:
-        conn.run("""
-            INSERT INTO matriculaciones
-            (anio, mes, marca, modelo, tipo, propulsion, cilindrada, ciudad, provincia, persona, renting)
-            VALUES (:anio,:mes,:marca,:modelo,:tipo,:prop,:cil,:ciudad,:prov,:persona,:renting)
-        """, anio=r['anio_num'], mes=r['mes_num'], marca=r['marca'], modelo=r['modelo'],
-            tipo=r['tipo'], prop=r['propulsion'], cil=r['cilindrada'],
-            ciudad=r['ciudad'], prov=r['provincia'], persona=r['persona'], renting=r['renting'])
-    conn.close()
+    # Insertar en lotes de 500
+    batch_size = 500
+    for i in range(0, len(registros), batch_size):
+        lote = registros[i:i+batch_size]
+        payload = [{
+            "anio": r["anio_num"], "mes": r["mes_num"],
+            "marca": r["marca"], "modelo": r["modelo"],
+            "tipo": r["tipo"], "propulsion": r["propulsion"],
+            "cilindrada": r["cilindrada"], "ciudad": r["ciudad"],
+            "provincia": r["provincia"], "persona": r["persona"],
+            "renting": r["renting"]
+        } for r in lote]
+        requests.post(
+            f"{SUPABASE_URL}/rest/v1/matriculaciones",
+            headers={**sb_headers(), "Prefer": "resolution=ignore-duplicates"},
+            json=payload, timeout=60
+        )
 
+def consultar_bd(conditions_dict, anio_desde, anio_hasta, mes_desde, mes_hasta):
+    params = {
+        "anio": f"gte.{anio_desde}",
+        "mes":  f"gte.{mes_desde}",
+        "select": "*",
+        "order": "anio,mes",
+        "limit": "500"
+    }
+    params["anio"] = f"gte.{anio_desde}"
+
+    # Supabase REST no soporta BETWEEN directamente, usamos gte/lte
+    base_params = [
+        ("anio", f"gte.{anio_desde}"),
+        ("anio", f"lte.{anio_hasta}"),
+        ("mes",  f"gte.{mes_desde}"),
+        ("mes",  f"lte.{mes_hasta}"),
+        ("select", "*"),
+        ("order", "anio,mes"),
+        ("limit", "500"),
+    ]
+
+    for key, val in conditions_dict.items():
+        base_params.append((key, val))
+
+    r = requests.get(
+        f"{SUPABASE_URL}/rest/v1/matriculaciones",
+        headers={**sb_headers(), "Prefer": "count=exact"},
+        params=base_params,
+        timeout=30
+    )
+    total = int(r.headers.get("Content-Range", "0/0").split("/")[-1])
+    return r.json(), total
+
+# ── Cache marcas ──────────────────────────────────────────────────────────────
 _cache_marcas = None
 _cache_fecha  = None
 
@@ -61,19 +130,21 @@ def cargar_marcas_modelos():
     if _cache_marcas and _cache_fecha == hoy:
         return _cache_marcas
     try:
-        conn = get_db()
-        rows = conn.run("SELECT DISTINCT marca, modelo FROM matriculaciones ORDER BY marca, modelo")
-        conn.close()
-        result = defaultdict(list)
-        for marca, modelo in rows:
-            if modelo:
-                result[marca].append(modelo)
-        _cache_marcas = dict(result)
+        rows = sb_get("matriculaciones", {
+            "select": "marca,modelo",
+            "limit": "50000"
+        })
+        result = defaultdict(set)
+        for row in rows:
+            if row.get("marca") and row.get("modelo"):
+                result[row["marca"]].add(row["modelo"])
+        _cache_marcas = {m: sorted(modelos) for m, modelos in sorted(result.items())}
         _cache_fecha  = hoy
         return _cache_marcas
     except Exception:
         return {}
 
+# ── Tablas de códigos DGT ─────────────────────────────────────────────────────
 COD_PROP = {
     "0":"Gasolina","1":"Diésel","2":"Eléctrico","3":"Otros",
     "4":"Butano","5":"Solar","6":"Gas Licuado (GLP)",
@@ -141,12 +212,10 @@ def procesar_zip(contenido, anio, mes):
         })
     return registros
 
+# ── Rutas ─────────────────────────────────────────────────────────────────────
+
 @app.route("/")
 def index():
-    try:
-        init_db()
-    except Exception:
-        pass
     return render_template("index.html",
         provincias=sorted(COD_PROVINCIA.values()),
         tipos=sorted(set(COD_TIPO.values())),
@@ -156,14 +225,13 @@ def index():
 
 @app.route("/test")
 def test():
-    import traceback
     try:
-        conn = get_db()
-        result = conn.run("SELECT version()")
-        conn.close()
-        return jsonify({"status": "ok", "db": str(result)})
+        r = requests.get(f"{SUPABASE_URL}/rest/v1/matriculaciones",
+                         headers=sb_headers(),
+                         params={"select": "id", "limit": "1"}, timeout=10)
+        return jsonify({"status": "ok", "supabase": r.status_code, "url": SUPABASE_URL})
     except Exception as e:
-        return jsonify({"status": "error", "error": str(e), "trace": traceback.format_exc()})
+        return jsonify({"status": "error", "error": str(e)})
 
 @app.route("/marcas")
 def marcas():
@@ -188,15 +256,19 @@ def consulta():
     mes_hoy    = datetime.now().month
 
     def generar():
-        # Descargar meses que faltan en la BD
+        # Descargar meses que faltan
         for anio in range(anio_desde, anio_hasta + 1):
             mes_max = 12 if anio < anio_hoy else mes_hoy - 1
             m_ini = mes_desde if anio == anio_desde else 1
             m_fin = min(mes_hasta, mes_max) if anio == anio_hasta else mes_max
             for mes in range(m_ini, m_fin + 1):
-                if mes_ya_cargado(anio, mes):
-                    yield "data: " + json.dumps({"tipo":"progreso","texto":f"{MESES[mes]} {anio}: ya guardado ✓"}) + "\n\n"
-                    continue
+                try:
+                    if mes_ya_cargado(anio, mes):
+                        yield "data: " + json.dumps({"tipo":"progreso","texto":f"{MESES[mes]} {anio}: ya guardado ✓"}) + "\n\n"
+                        continue
+                except Exception:
+                    pass
+
                 yield "data: " + json.dumps({"tipo":"progreso","texto":f"Descargando {MESES[mes]} {anio}..."}) + "\n\n"
                 for intento in range(3):
                     try:
@@ -212,42 +284,32 @@ def consulta():
                         guardar_registros(registros)
                         yield "data: " + json.dumps({"tipo":"progreso","texto":f"{MESES[mes]} {anio}: {len(registros):,} registros guardados ✓"}) + "\n\n"
                         break
-                    except Exception:
+                    except Exception as e:
                         if intento == 2:
-                            yield "data: " + json.dumps({"tipo":"progreso","texto":f"{MESES[mes]} {anio}: omitido tras 3 intentos"}) + "\n\n"
+                            yield "data: " + json.dumps({"tipo":"progreso","texto":f"{MESES[mes]} {anio}: omitido ({str(e)[:50]})"}) + "\n\n"
 
-        # Consultar BD
+        # Consultar Supabase
         yield "data: " + json.dumps({"tipo":"progreso","texto":"Consultando base de datos..."}) + "\n\n"
         try:
-            conditions = ["anio BETWEEN :ad AND :ah", "mes BETWEEN :md AND :mh"]
-            params = {"ad": anio_desde, "ah": anio_hasta, "md": mes_desde, "mh": mes_hasta}
+            conditions = []
+            if marca:      conditions.append(("marca",      f"ilike.*{marca}*"))
+            if modelo:     conditions.append(("modelo",     f"ilike.*{modelo}*"))
+            if ciudad:     conditions.append(("ciudad",     f"ilike.*{ciudad}*"))
+            if provincia:  conditions.append(("provincia",  f"eq.{provincia}"))
+            if tipo:       conditions.append(("tipo",       f"eq.{tipo}"))
+            if propulsion: conditions.append(("propulsion", f"eq.{propulsion}"))
+            if persona:    conditions.append(("persona",    f"eq.{persona}"))
+            if renting:    conditions.append(("renting",    f"eq.{renting}"))
 
-            if marca:      conditions.append("UPPER(marca) LIKE :marca");     params["marca"]      = f"%{marca}%"
-            if modelo:     conditions.append("UPPER(modelo) LIKE :modelo");   params["modelo"]     = f"%{modelo}%"
-            if ciudad:     conditions.append("UPPER(ciudad) LIKE :ciudad");   params["ciudad"]     = f"%{ciudad}%"
-            if provincia:  conditions.append("provincia = :provincia");       params["provincia"]  = provincia
-            if tipo:       conditions.append("tipo = :tipo");                 params["tipo"]       = tipo
-            if propulsion: conditions.append("propulsion = :propulsion");     params["propulsion"] = propulsion
-            if persona:    conditions.append("persona = :persona");           params["persona"]    = persona
-            if renting:    conditions.append("renting = :renting");           params["renting"]    = renting
-
-            where = " AND ".join(conditions)
-            conn = get_db()
-            total = conn.run(f"SELECT COUNT(*) FROM matriculaciones WHERE {where}", **params)[0][0]
-            rows  = conn.run(f"""
-                SELECT anio, mes, marca, modelo, tipo, propulsion,
-                       cilindrada, ciudad, provincia, persona, renting
-                FROM matriculaciones WHERE {where}
-                ORDER BY anio, mes LIMIT 500
-            """, **params)
-            conn.close()
+            rows, total = consultar_bd(dict(conditions), anio_desde, anio_hasta, mes_desde, mes_hasta)
 
             resultados = [{
-                "anio": r[0], "mes": MESES[r[1]],
-                "marca": r[2], "modelo": r[3], "tipo": r[4],
-                "propulsion": r[5], "cilindrada": r[6] if r[6] else "-",
-                "ciudad": r[7], "provincia": r[8],
-                "persona": r[9], "renting": r[10],
+                "anio": r["anio"], "mes": MESES[r["mes"]],
+                "marca": r["marca"], "modelo": r["modelo"], "tipo": r["tipo"],
+                "propulsion": r["propulsion"],
+                "cilindrada": r["cilindrada"] if r["cilindrada"] else "-",
+                "ciudad": r["ciudad"], "provincia": r["provincia"],
+                "persona": r["persona"], "renting": r["renting"],
             } for r in rows]
 
             resumen = defaultdict(lambda: defaultdict(int))
@@ -258,20 +320,17 @@ def consulta():
             yield "data: " + json.dumps({
                 "tipo": "resultado",
                 "total": total,
-                "meses_procesados": len(rows),
+                "meses_procesados": len(set((r['anio'], r['mes']) for r in resultados)),
                 "anios": anios,
-                "resumen": [{"modelo":k,"totales":dict(v),"total":sum(v.values())} for k,v in sorted(resumen.items(), key=lambda x: sum(x[1].values()), reverse=True)],
+                "resumen": [{"modelo":k,"totales":dict(v),"total":sum(v.values())}
+                            for k,v in sorted(resumen.items(), key=lambda x: sum(x[1].values()), reverse=True)],
                 "registros": resultados
             }) + "\n\n"
 
         except Exception as e:
-            yield "data: " + json.dumps({"tipo":"error","texto":str(e)}) + "\n\n"
+            yield "data: " + json.dumps({"tipo":"error","texto":f"Error en consulta: {str(e)}"}) + "\n\n"
 
-    try:
-        return Response(stream_with_context(generar()), mimetype="text/event-stream")
-    except Exception as e:
-        import traceback
-        return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
+    return Response(stream_with_context(generar()), mimetype="text/event-stream")
 
 if __name__ == "__main__":
     app.run(debug=True)
