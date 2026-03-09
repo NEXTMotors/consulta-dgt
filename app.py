@@ -1,54 +1,75 @@
-from flask import Flask, render_template, request, jsonify
-import requests, zipfile, io
+from flask import Flask, render_template, request, jsonify, Response, stream_with_context
+import requests, zipfile, io, os, json
 from collections import defaultdict
 from datetime import datetime
+import psycopg2, psycopg2.extras
 
 app = Flask(__name__)
 
-# Cache para no descargar en cada petición
-_cache_marcas_modelos = None
-_cache_fecha = None
+DATABASE_URL = os.environ.get("DATABASE_URL")
+
+def get_db():
+    return psycopg2.connect(DATABASE_URL)
+
+def init_db():
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS matriculaciones (
+                    id SERIAL PRIMARY KEY,
+                    anio INTEGER, mes INTEGER,
+                    marca TEXT, modelo TEXT, tipo TEXT,
+                    propulsion TEXT, cilindrada INTEGER,
+                    ciudad TEXT, provincia TEXT,
+                    persona TEXT, renting TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_marca    ON matriculaciones(marca);
+                CREATE INDEX IF NOT EXISTS idx_anio_mes ON matriculaciones(anio, mes);
+            """)
+            conn.commit()
+
+def mes_ya_cargado(anio, mes):
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM matriculaciones WHERE anio=%s AND mes=%s", (anio, mes))
+            return cur.fetchone()[0] > 0
+
+def guardar_registros(registros):
+    if not registros:
+        return
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            psycopg2.extras.execute_values(cur, """
+                INSERT INTO matriculaciones
+                (anio, mes, marca, modelo, tipo, propulsion, cilindrada, ciudad, provincia, persona, renting)
+                VALUES %s
+            """, [(r['anio_num'], r['mes_num'], r['marca'], r['modelo'], r['tipo'],
+                   r['propulsion'], r['cilindrada'], r['ciudad'], r['provincia'],
+                   r['persona'], r['renting']) for r in registros])
+            conn.commit()
+
+_cache_marcas = None
+_cache_fecha  = None
 
 def cargar_marcas_modelos():
-    global _cache_marcas_modelos, _cache_fecha
-    # Refrescar solo una vez al día
+    global _cache_marcas, _cache_fecha
     hoy = datetime.now().date()
-    if _cache_marcas_modelos and _cache_fecha == hoy:
-        return _cache_marcas_modelos
-
-    # Buscar el último mes disponible (hasta 6 meses atrás)
-    anio_hoy = datetime.now().year
-    mes_hoy  = datetime.now().month
-    contenido = None
-    for i in range(6):
-        mes  = (mes_hoy - 1 - i) % 12 + 1
-        anio = anio_hoy if (mes_hoy - 1 - i) >= 0 else anio_hoy - 1
-        url  = BASE_URL.format(a=anio, m=mes)
-        try:
-            r = requests.get(url, timeout=30)
-            if r.status_code == 200:
-                with zipfile.ZipFile(io.BytesIO(r.content)) as z:
-                    contenido = z.read(z.namelist()[0])
-                break
-        except Exception:
-            continue
-
-    if not contenido:
+    if _cache_marcas and _cache_fecha == hoy:
+        return _cache_marcas
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT DISTINCT marca, modelo FROM matriculaciones ORDER BY marca, modelo")
+                rows = cur.fetchall()
+        result = defaultdict(list)
+        for marca, modelo in rows:
+            if modelo:
+                result[marca].append(modelo)
+        _cache_marcas = dict(result)
+        _cache_fecha  = hoy
+        return _cache_marcas
+    except Exception:
         return {}
-
-    marcas_modelos = defaultdict(set)
-    for linea in contenido.decode("latin1").split("\n"):
-        if len(linea) < 70:
-            continue
-        marca  = linea[17:47].strip()
-        modelo = linea[47:69].strip()
-        if marca:
-            marcas_modelos[marca].add(modelo)
-
-    result = {m: sorted(modelos) for m, modelos in sorted(marcas_modelos.items())}
-    _cache_marcas_modelos = result
-    _cache_fecha = hoy
-    return result
 
 COD_PROP = {
     "0":"Gasolina","1":"Diésel","2":"Eléctrico","3":"Otros",
@@ -92,37 +113,51 @@ def leer_campo(linea, campo):
     p, l = POS[campo]
     return linea[p:p+l].strip()
 
+def procesar_zip(contenido, anio, mes):
+    registros = []
+    for linea in contenido.decode("latin1").split("\n"):
+        if len(linea) < 285:
+            continue
+        marca = leer_campo(linea, "marca")
+        if not marca:
+            continue
+        ci_raw = leer_campo(linea, "cil")
+        pe_raw = leer_campo(linea, "persona")
+        re_raw = leer_campo(linea, "renting")
+        registros.append({
+            "anio_num": anio, "mes_num": mes,
+            "marca":    marca,
+            "modelo":   leer_campo(linea, "modelo"),
+            "tipo":     COD_TIPO.get(leer_campo(linea, "cod_tipo"), "Desconocido"),
+            "propulsion": COD_PROP.get(leer_campo(linea, "prop"), "Desconocido"),
+            "cilindrada": int(ci_raw) if ci_raw.isdigit() else 0,
+            "ciudad":   leer_campo(linea, "localidad"),
+            "provincia": COD_PROVINCIA.get(leer_campo(linea, "prov"), "Desconocido"),
+            "persona":  "Física" if pe_raw == "D" else "Jurídica" if pe_raw == "X" else "",
+            "renting":  "Sí" if re_raw == "S" else "No",
+        })
+    return registros
+
 @app.route("/")
 def index():
+    try:
+        init_db()
+    except Exception:
+        pass
     return render_template("index.html",
         provincias=sorted(COD_PROVINCIA.values()),
         tipos=sorted(set(COD_TIPO.values())),
         propulsiones=sorted(set(COD_PROP.values())),
-        anio_actual=__import__('datetime').datetime.now().year
+        anio_actual=datetime.now().year
     )
-
-@app.route("/test")
-def test():
-    url = BASE_URL.format(a=2025, m=1)
-    try:
-        r = requests.get(url, timeout=30, headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        })
-        return jsonify({"status": r.status_code, "url": url, "size": len(r.content)})
-    except Exception as e:
-        return jsonify({"error": str(e), "url": url})
 
 @app.route("/marcas")
 def marcas():
-    datos = cargar_marcas_modelos()
-    return jsonify(datos)
+    return jsonify(cargar_marcas_modelos())
 
 @app.route("/consulta", methods=["POST"])
 def consulta():
-    from flask import Response, stream_with_context
-    import json
-
-    data = request.json
+    data       = request.json
     marca      = data.get("marca","").strip().upper()
     modelo     = data.get("modelo","").strip().upper()
     ciudad     = data.get("ciudad","").strip().upper()
@@ -135,96 +170,77 @@ def consulta():
     anio_hasta = int(data.get("anio_hasta", 2024))
     mes_desde  = int(data.get("mes_desde", 1))
     mes_hasta  = int(data.get("mes_hasta", 12))
-
-    anio_hoy = datetime.now().year
-    mes_hoy  = datetime.now().month
+    anio_hoy   = datetime.now().year
+    mes_hoy    = datetime.now().month
 
     def generar():
-        resultados = []
-        meses_procesados = 0
-
+        # Descargar meses que no están en la BD
         for anio in range(anio_desde, anio_hasta + 1):
             mes_max = 12 if anio < anio_hoy else mes_hoy - 1
             m_ini = mes_desde if anio == anio_desde else 1
             m_fin = min(mes_hasta, mes_max) if anio == anio_hasta else mes_max
-
             for mes in range(m_ini, m_fin + 1):
-                # Notificar progreso al navegador
-                yield f"data: {json.dumps({'tipo': 'progreso', 'texto': f'Descargando {MESES[mes]} {anio}...'})}\n\n"
-
+                if mes_ya_cargado(anio, mes):
+                    yield f"data: {json.dumps({'tipo':'progreso','texto':f'{MESES[mes]} {anio}: ya guardado ✓'})}\n\n"
+                    continue
+                yield f"data: {json.dumps({'tipo':'progreso','texto':f'Descargando {MESES[mes]} {anio}...'})}\n\n"
                 try:
                     r = requests.get(BASE_URL.format(a=anio, m=mes), timeout=55)
                     if r.status_code != 200:
-                        yield f"data: {json.dumps({'tipo': 'progreso', 'texto': f'{MESES[mes]} {anio}: no disponible'})}\n\n"
+                        yield f"data: {json.dumps({'tipo':'progreso','texto':f'{MESES[mes]} {anio}: no disponible'})}\n\n"
                         continue
                     with zipfile.ZipFile(io.BytesIO(r.content)) as z:
                         contenido = z.read(z.namelist()[0])
+                    registros = procesar_zip(contenido, anio, mes)
+                    guardar_registros(registros)
+                    yield f"data: {json.dumps({'tipo':'progreso','texto':f'{MESES[mes]} {anio}: {len(registros):,} registros guardados ✓'})}\n\n"
+                except Exception:
+                    yield f"data: {json.dumps({'tipo':'progreso','texto':f'Error en {MESES[mes]} {anio}'})}\n\n"
 
-                    encontrados = 0
-                    for linea in contenido.decode("latin1").split("\n"):
-                        if len(linea) < 285:
-                            continue
-                        m_val = leer_campo(linea, "marca")
-                        if not m_val:
-                            continue
-                        mo_val = leer_campo(linea, "modelo")
-                        ti_val = COD_TIPO.get(leer_campo(linea, "cod_tipo"), "Desconocido")
-                        pr_val = COD_PROP.get(leer_campo(linea, "prop"), "Desconocido")
-                        ci_raw = leer_campo(linea, "cil")
-                        lo_val = leer_campo(linea, "localidad")
-                        pv_val = COD_PROVINCIA.get(leer_campo(linea, "prov"), "Desconocido")
-                        pe_raw = leer_campo(linea, "persona")
-                        re_raw = leer_campo(linea, "renting")
+        # Consultar BD con filtros
+        yield f"data: {json.dumps({'tipo':'progreso','texto':'Consultando base de datos...'})}\n\n"
+        try:
+            conditions = ["anio BETWEEN %s AND %s", "mes BETWEEN %s AND %s"]
+            params     = [anio_desde, anio_hasta, mes_desde, mes_hasta]
+            if marca:      conditions.append("UPPER(marca) LIKE %s");     params.append(f"%{marca}%")
+            if modelo:     conditions.append("UPPER(modelo) LIKE %s");    params.append(f"%{modelo}%")
+            if ciudad:     conditions.append("UPPER(ciudad) LIKE %s");    params.append(f"%{ciudad}%")
+            if provincia:  conditions.append("provincia = %s");           params.append(provincia)
+            if tipo:       conditions.append("tipo = %s");                params.append(tipo)
+            if propulsion: conditions.append("propulsion = %s");          params.append(propulsion)
+            if persona:    conditions.append("persona = %s");             params.append(persona)
+            if renting:    conditions.append("renting = %s");             params.append(renting)
 
-                        pe_val = "Física" if pe_raw == "D" else "Jurídica" if pe_raw == "X" else ""
-                        re_val = "Sí" if re_raw == "S" else "No"
-                        cil    = int(ci_raw) if ci_raw.isdigit() else 0
+            where = " AND ".join(conditions)
+            with get_db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(f"SELECT COUNT(*) FROM matriculaciones WHERE {where}", params)
+                    total = cur.fetchone()[0]
+                    cur.execute(f"""
+                        SELECT anio, mes, marca, modelo, tipo, propulsion,
+                               cilindrada, ciudad, provincia, persona, renting
+                        FROM matriculaciones WHERE {where}
+                        ORDER BY anio, mes LIMIT 500
+                    """, params)
+                    rows = cur.fetchall()
 
-                        if marca      and marca      not in m_val.upper():   continue
-                        if modelo     and modelo     not in mo_val.upper():  continue
-                        if ciudad     and ciudad     not in lo_val.upper():  continue
-                        if provincia  and provincia  != pv_val:              continue
-                        if tipo       and tipo       != ti_val:              continue
-                        if propulsion and propulsion != pr_val:              continue
-                        if persona    and persona    != pe_val:              continue
-                        if renting    and renting    != re_val:              continue
+            resultados = [{
+                "anio": r[0], "mes": MESES[r[1]],
+                "marca": r[2], "modelo": r[3], "tipo": r[4],
+                "propulsion": r[5], "cilindrada": r[6] if r[6] else "-",
+                "ciudad": r[7], "provincia": r[8],
+                "persona": r[9], "renting": r[10],
+            } for r in rows]
 
-                        resultados.append({
-                            "anio": anio, "mes": MESES[mes],
-                            "marca": m_val, "modelo": mo_val,
-                            "tipo": ti_val, "propulsion": pr_val,
-                            "cilindrada": cil if cil > 0 else "-",
-                            "ciudad": lo_val, "provincia": pv_val,
-                            "persona": pe_val, "renting": re_val,
-                        })
-                        encontrados += 1
+            resumen = defaultdict(lambda: defaultdict(int))
+            for reg in resultados:
+                resumen[f"{reg['marca']} {reg['modelo']}".strip()][reg['anio']] += 1
+            anios = sorted(set(r['anio'] for r in resultados)) if resultados else []
 
-                    meses_procesados += 1
-                    yield f"data: {json.dumps({'tipo': 'progreso', 'texto': f'{MESES[mes]} {anio}: {encontrados} registros'})}\n\n"
+            yield f"data: {json.dumps({'tipo':'resultado','total':total,'meses_procesados':len(rows),'anios':anios,'resumen':[{'modelo':k,'totales':dict(v),'total':sum(v.values())} for k,v in sorted(resumen.items(),key=lambda x:sum(x[1].values()),reverse=True)],'registros':resultados})}\n\n"
 
-                except Exception as e:
-                    yield f"data: {json.dumps({'tipo': 'progreso', 'texto': f'Error en {MESES[mes]} {anio}'})}\n\n"
-                    continue
-
-        # Enviar resultado final
-        resumen = defaultdict(lambda: defaultdict(int))
-        for reg in resultados:
-            resumen[f"{reg['marca']} {reg['modelo']}".strip()][reg['anio']] += 1
-
-        anios = sorted(set(r['anio'] for r in resultados)) if resultados else []
-
-        resultado_final = {
-            "tipo": "resultado",
-            "total": len(resultados),
-            "meses_procesados": meses_procesados,
-            "anios": anios,
-            "resumen": [
-                {"modelo": k, "totales": dict(v), "total": sum(v.values())}
-                for k, v in sorted(resumen.items(), key=lambda x: sum(x[1].values()), reverse=True)
-            ],
-            "registros": resultados[:500]
-        }
-        yield f"data: {json.dumps(resultado_final)}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'tipo':'error','texto':str(e)})}\n\n"
 
     return Response(stream_with_context(generar()), mimetype="text/event-stream")
 
