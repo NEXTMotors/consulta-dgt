@@ -177,16 +177,6 @@ def consulta():
     mes_hoy    = datetime.now().month
 
     def generar():
-        try:
-            conn = get_db()
-            conn.close()
-            yield "data: " + json.dumps({"tipo":"progreso","texto":"Conexion a BD OK"}) + "\n\n"
-        except Exception as e:
-            yield "data: " + json.dumps({"tipo":"error","texto":"Error BD: " + str(e)}) + "\n\n"
-            return
-
-
-
         # Descargar meses que faltan en la BD
         for anio in range(anio_desde, anio_hasta + 1):
             mes_max = 12 if anio < anio_hoy else mes_hoy - 1
@@ -194,64 +184,46 @@ def consulta():
             m_fin = min(mes_hasta, mes_max) if anio == anio_hasta else mes_max
             for mes in range(m_ini, m_fin + 1):
                 if mes_ya_cargado(anio, mes):
-                    yield f"data: {json.dumps({'tipo':'progreso','texto':f'{MESES[mes]} {anio}: ya guardado ✓'})}\n\n"
+                    yield "data: " + json.dumps({"tipo":"progreso","texto":f"{MESES[mes]} {anio}: ya guardado ✓"}) + "\n\n"
                     continue
-                yield f"data: {json.dumps({'tipo':'progreso','texto':f'Descargando {MESES[mes]} {anio}...'})}\n\n"
+                yield "data: " + json.dumps({"tipo":"progreso","texto":f"Descargando {MESES[mes]} {anio}..."}) + "\n\n"
                 for intento in range(3):
                     try:
                         if intento > 0:
-                            yield f"data: {json.dumps({'tipo':'progreso','texto':f'Reintentando {MESES[mes]} {anio} ({intento+1}/3)...'})}\n\n"
+                            yield "data: " + json.dumps({"tipo":"progreso","texto":f"Reintentando {MESES[mes]} {anio} ({intento+1}/3)..."}) + "\n\n"
                         r = requests.get(BASE_URL.format(a=anio, m=mes), timeout=120)
                         if r.status_code != 200:
-                            yield f"data: {json.dumps({'tipo':'progreso','texto':f'{MESES[mes]} {anio}: no disponible'})}\n\n"
+                            yield "data: " + json.dumps({"tipo":"progreso","texto":f"{MESES[mes]} {anio}: no disponible"}) + "\n\n"
                             break
                         with zipfile.ZipFile(io.BytesIO(r.content)) as z:
                             contenido = z.read(z.namelist()[0])
                         registros = procesar_zip(contenido, anio, mes)
                         guardar_registros(registros)
-                        yield f"data: {json.dumps({'tipo':'progreso','texto':f'{MESES[mes]} {anio}: {len(registros):,} registros guardados ✓'})}\n\n"
+                        yield "data: " + json.dumps({"tipo":"progreso","texto":f"{MESES[mes]} {anio}: {len(registros):,} registros guardados ✓"}) + "\n\n"
                         break
                     except Exception:
                         if intento == 2:
-                            yield f"data: {json.dumps({'tipo':'progreso','texto':f'{MESES[mes]} {anio}: omitido tras 3 intentos'})}\n\n"
+                            yield "data: " + json.dumps({"tipo":"progreso","texto":f"{MESES[mes]} {anio}: omitido tras 3 intentos"}) + "\n\n"
 
         # Consultar BD
-        yield f"data: {json.dumps({'tipo':'progreso','texto':'Consultando base de datos...'})}\n\n"
+        yield "data: " + json.dumps({"tipo":"progreso","texto":"Consultando base de datos..."}) + "\n\n"
         try:
             conditions = ["anio BETWEEN :ad AND :ah", "mes BETWEEN :md AND :mh"]
             params = {"ad": anio_desde, "ah": anio_hasta, "md": mes_desde, "mh": mes_hasta}
 
-            if marca:
-                conditions.append("UPPER(marca) LIKE :marca")
-                params["marca"] = f"%{marca}%"
-            if modelo:
-                conditions.append("UPPER(modelo) LIKE :modelo")
-                params["modelo"] = f"%{modelo}%"
-            if ciudad:
-                conditions.append("UPPER(ciudad) LIKE :ciudad")
-                params["ciudad"] = f"%{ciudad}%"
-            if provincia:
-                conditions.append("provincia = :provincia")
-                params["provincia"] = provincia
-            if tipo:
-                conditions.append("tipo = :tipo")
-                params["tipo"] = tipo
-            if propulsion:
-                conditions.append("propulsion = :propulsion")
-                params["propulsion"] = propulsion
-            if persona:
-                conditions.append("persona = :persona")
-                params["persona"] = persona
-            if renting:
-                conditions.append("renting = :renting")
-                params["renting"] = renting
+            if marca:      conditions.append("UPPER(marca) LIKE :marca");     params["marca"]      = f"%{marca}%"
+            if modelo:     conditions.append("UPPER(modelo) LIKE :modelo");   params["modelo"]     = f"%{modelo}%"
+            if ciudad:     conditions.append("UPPER(ciudad) LIKE :ciudad");   params["ciudad"]     = f"%{ciudad}%"
+            if provincia:  conditions.append("provincia = :provincia");       params["provincia"]  = provincia
+            if tipo:       conditions.append("tipo = :tipo");                 params["tipo"]       = tipo
+            if propulsion: conditions.append("propulsion = :propulsion");     params["propulsion"] = propulsion
+            if persona:    conditions.append("persona = :persona");           params["persona"]    = persona
+            if renting:    conditions.append("renting = :renting");           params["renting"]    = renting
 
             where = " AND ".join(conditions)
-
             conn = get_db()
-            total_rows = conn.run(f"SELECT COUNT(*) FROM matriculaciones WHERE {where}", **params)
-            total = total_rows[0][0]
-            rows = conn.run(f"""
+            total = conn.run(f"SELECT COUNT(*) FROM matriculaciones WHERE {where}", **params)[0][0]
+            rows  = conn.run(f"""
                 SELECT anio, mes, marca, modelo, tipo, propulsion,
                        cilindrada, ciudad, provincia, persona, renting
                 FROM matriculaciones WHERE {where}
@@ -272,10 +244,17 @@ def consulta():
                 resumen[f"{reg['marca']} {reg['modelo']}".strip()][reg['anio']] += 1
             anios = sorted(set(r['anio'] for r in resultados)) if resultados else []
 
-            yield f"data: {json.dumps({'tipo':'resultado','total':total,'meses_procesados':len(rows),'anios':anios,'resumen':[{'modelo':k,'totales':dict(v),'total':sum(v.values())} for k,v in sorted(resumen.items(),key=lambda x:sum(x[1].values()),reverse=True)],'registros':resultados})}\n\n"
+            yield "data: " + json.dumps({
+                "tipo": "resultado",
+                "total": total,
+                "meses_procesados": len(rows),
+                "anios": anios,
+                "resumen": [{"modelo":k,"totales":dict(v),"total":sum(v.values())} for k,v in sorted(resumen.items(), key=lambda x: sum(x[1].values()), reverse=True)],
+                "registros": resultados
+            }) + "\n\n"
 
         except Exception as e:
-            yield f"data: {json.dumps({'tipo':'error','texto':str(e)})}\n\n"
+            yield "data: " + json.dumps({"tipo":"error","texto":str(e)}) + "\n\n"
 
     return Response(stream_with_context(generar()), mimetype="text/event-stream")
 
