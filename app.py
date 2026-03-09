@@ -1,8 +1,54 @@
 from flask import Flask, render_template, request, jsonify
 import requests, zipfile, io
 from collections import defaultdict
+from datetime import datetime
 
 app = Flask(__name__)
+
+# Cache para no descargar en cada petición
+_cache_marcas_modelos = None
+_cache_fecha = None
+
+def cargar_marcas_modelos():
+    global _cache_marcas_modelos, _cache_fecha
+    # Refrescar solo una vez al día
+    hoy = datetime.now().date()
+    if _cache_marcas_modelos and _cache_fecha == hoy:
+        return _cache_marcas_modelos
+
+    # Buscar el último mes disponible (hasta 6 meses atrás)
+    anio_hoy = datetime.now().year
+    mes_hoy  = datetime.now().month
+    contenido = None
+    for i in range(6):
+        mes  = (mes_hoy - 1 - i) % 12 + 1
+        anio = anio_hoy if (mes_hoy - 1 - i) >= 0 else anio_hoy - 1
+        url  = BASE_URL.format(a=anio, m=mes)
+        try:
+            r = requests.get(url, timeout=30)
+            if r.status_code == 200:
+                with zipfile.ZipFile(io.BytesIO(r.content)) as z:
+                    contenido = z.read(z.namelist()[0])
+                break
+        except Exception:
+            continue
+
+    if not contenido:
+        return {}
+
+    marcas_modelos = defaultdict(set)
+    for linea in contenido.decode("latin1").split("\n"):
+        if len(linea) < 70:
+            continue
+        marca  = linea[17:47].strip()
+        modelo = linea[47:69].strip()
+        if marca:
+            marcas_modelos[marca].add(modelo)
+
+    result = {m: sorted(modelos) for m, modelos in sorted(marcas_modelos.items())}
+    _cache_marcas_modelos = result
+    _cache_fecha = hoy
+    return result
 
 COD_PROP = {
     "0":"Gasolina","1":"Diésel","2":"Eléctrico","3":"Otros",
@@ -55,6 +101,11 @@ def index():
         anio_actual=__import__('datetime').datetime.now().year
     )
 
+@app.route("/marcas")
+def marcas():
+    datos = cargar_marcas_modelos()
+    return jsonify(datos)
+
 @app.route("/consulta", methods=["POST"])
 def consulta():
     data = request.json
@@ -71,7 +122,6 @@ def consulta():
     mes_desde  = int(data.get("mes_desde", 1))
     mes_hasta  = int(data.get("mes_hasta", 12))
 
-    from datetime import datetime
     anio_hoy = datetime.now().year
     mes_hoy  = datetime.now().month
 
