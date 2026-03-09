@@ -177,6 +177,25 @@ def consulta():
     mes_hoy    = datetime.now().month
 
     def generar():
+        try:
+            conn = get_db()
+            conn.close()
+            yield "data: " + json.dumps({"tipo":"progreso","texto":"Conexion a BD OK"}) + "\n\n"
+        except Exception as e:
+            yield "data: " + json.dumps({"tipo":"error","texto":"Error BD: " + str(e)}) + "\n\n"
+            return
+
+        # Comprobar conexion a BD
+        try:
+            conn = get_db()
+            conn.close()
+            yield f"data: {json.dumps({'tipo':'progreso','texto':'Conexion a base de datos OK'})}"
+            yield "\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'tipo':'error','texto':f'Error BD: {str(e)}'})}"
+            yield "\n\n"
+            return
+
         # Descargar meses que faltan en la BD
         for anio in range(anio_desde, anio_hasta + 1):
             mes_max = 12 if anio < anio_hoy else mes_hoy - 1
