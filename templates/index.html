@@ -1,0 +1,557 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Consulta Matriculaciones DGT</title>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:       #0b0f1a;
+    --surface:  #131929;
+    --card:     #1a2235;
+    --border:   #263047;
+    --accent:   #3b82f6;
+    --accent2:  #60a5fa;
+    --text:     #e2e8f0;
+    --muted:    #64748b;
+    --success:  #22c55e;
+    --radius:   12px;
+  }
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'DM Sans', sans-serif;
+    min-height: 100vh;
+    background-image:
+      radial-gradient(ellipse 80% 50% at 50% -20%, rgba(59,130,246,0.15), transparent),
+      radial-gradient(ellipse 40% 30% at 80% 80%, rgba(96,165,250,0.07), transparent);
+  }
+
+  header {
+    padding: 2.5rem 2rem 1.5rem;
+    text-align: center;
+    border-bottom: 1px solid var(--border);
+  }
+  header h1 {
+    font-family: 'Syne', sans-serif;
+    font-size: clamp(1.6rem, 4vw, 2.6rem);
+    font-weight: 800;
+    letter-spacing: -0.03em;
+    background: linear-gradient(135deg, #fff 40%, var(--accent2));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  header p {
+    color: var(--muted);
+    font-size: 0.95rem;
+    margin-top: 0.4rem;
+    font-weight: 300;
+  }
+
+  main {
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 2rem 1.5rem 4rem;
+  }
+
+  /* ── Formulario ─────────────────────────────────────────── */
+  .form-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 2rem;
+    margin-bottom: 2rem;
+  }
+  .form-card h2 {
+    font-family: 'Syne', sans-serif;
+    font-size: 1rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--accent2);
+    margin-bottom: 1.5rem;
+  }
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 1rem;
+  }
+  .grid-dates {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    gap: 1rem;
+    margin-top: 1rem;
+  }
+
+  .field label {
+    display: block;
+    font-size: 0.75rem;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+    margin-bottom: 0.4rem;
+  }
+  .field input,
+  .field select {
+    width: 100%;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.6rem 0.85rem;
+    color: var(--text);
+    font-family: 'DM Sans', sans-serif;
+    font-size: 0.9rem;
+    outline: none;
+    transition: border-color 0.2s, box-shadow 0.2s;
+    appearance: none;
+  }
+  .field input:focus,
+  .field select:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(59,130,246,0.15);
+  }
+  .field select {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2364748b' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 0.75rem center;
+    padding-right: 2rem;
+  }
+
+  .divider {
+    height: 1px;
+    background: var(--border);
+    margin: 1.5rem 0;
+  }
+
+  .actions {
+    display: flex;
+    gap: 0.75rem;
+    margin-top: 1.5rem;
+    flex-wrap: wrap;
+  }
+  .btn {
+    padding: 0.7rem 1.6rem;
+    border-radius: 8px;
+    font-family: 'Syne', sans-serif;
+    font-weight: 700;
+    font-size: 0.9rem;
+    cursor: pointer;
+    border: none;
+    transition: all 0.2s;
+    letter-spacing: 0.03em;
+  }
+  .btn-primary {
+    background: var(--accent);
+    color: #fff;
+  }
+  .btn-primary:hover { background: var(--accent2); transform: translateY(-1px); }
+  .btn-primary:disabled { background: var(--border); color: var(--muted); cursor: not-allowed; transform: none; }
+  .btn-secondary {
+    background: transparent;
+    color: var(--muted);
+    border: 1px solid var(--border);
+  }
+  .btn-secondary:hover { border-color: var(--accent); color: var(--accent2); }
+
+  /* ── Estado ─────────────────────────────────────────────── */
+  #estado {
+    display: none;
+    align-items: center;
+    gap: 0.75rem;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 1rem 1.5rem;
+    margin-bottom: 1.5rem;
+    font-size: 0.9rem;
+    color: var(--muted);
+  }
+  #estado.visible { display: flex; }
+  .spinner {
+    width: 18px; height: 18px;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    flex-shrink: 0;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ── Resultados ─────────────────────────────────────────── */
+  #resultados { display: none; }
+  #resultados.visible { display: block; }
+
+  .stats-row {
+    display: flex;
+    gap: 1rem;
+    margin-bottom: 1.5rem;
+    flex-wrap: wrap;
+  }
+  .stat-box {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 1rem 1.5rem;
+    flex: 1;
+    min-width: 140px;
+  }
+  .stat-box .val {
+    font-family: 'Syne', sans-serif;
+    font-size: 1.8rem;
+    font-weight: 800;
+    color: var(--accent2);
+  }
+  .stat-box .lbl {
+    font-size: 0.75rem;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-top: 0.2rem;
+  }
+
+  .results-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    margin-bottom: 1.5rem;
+  }
+  .results-card h3 {
+    font-family: 'Syne', sans-serif;
+    font-size: 0.85rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--accent2);
+    padding: 1rem 1.5rem;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .table-wrap { overflow-x: auto; }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+  }
+  thead th {
+    background: var(--surface);
+    padding: 0.7rem 1rem;
+    text-align: left;
+    font-size: 0.72rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: var(--muted);
+    white-space: nowrap;
+    border-bottom: 1px solid var(--border);
+  }
+  tbody tr { border-bottom: 1px solid var(--border); transition: background 0.15s; }
+  tbody tr:hover { background: rgba(59,130,246,0.05); }
+  tbody td {
+    padding: 0.65rem 1rem;
+    color: var(--text);
+    white-space: nowrap;
+  }
+  tbody td.num { color: var(--accent2); font-weight: 600; font-family: 'Syne', sans-serif; }
+
+  .badge {
+    display: inline-block;
+    padding: 0.15rem 0.5rem;
+    border-radius: 4px;
+    font-size: 0.72rem;
+    font-weight: 600;
+  }
+  .badge-fisica { background: rgba(34,197,94,0.15); color: #22c55e; }
+  .badge-juridica { background: rgba(59,130,246,0.15); color: #60a5fa; }
+  .badge-si { background: rgba(251,191,36,0.15); color: #fbbf24; }
+  .badge-no { background: rgba(100,116,139,0.12); color: #64748b; }
+
+  .nota { font-size: 0.78rem; color: var(--muted); padding: 0.75rem 1.5rem; }
+
+  #error-msg {
+    display: none;
+    background: rgba(239,68,68,0.1);
+    border: 1px solid rgba(239,68,68,0.3);
+    border-radius: var(--radius);
+    padding: 1rem 1.5rem;
+    color: #f87171;
+    font-size: 0.9rem;
+    margin-bottom: 1.5rem;
+  }
+  #error-msg.visible { display: block; }
+
+  @media (max-width: 600px) {
+    .grid { grid-template-columns: 1fr 1fr; }
+    .grid-dates { grid-template-columns: 1fr 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Matriculaciones DGT</h1>
+  <p>Consulta en tiempo real los datos oficiales de matriculaciones</p>
+</header>
+
+<main>
+
+  <div class="form-card">
+    <h2>Filtros de búsqueda</h2>
+
+    <div class="grid">
+      <div class="field">
+        <label>Marca</label>
+        <input type="text" id="marca" placeholder="Ej: NEXT, HONDA..." autocomplete="off">
+      </div>
+      <div class="field">
+        <label>Modelo</label>
+        <input type="text" id="modelo" placeholder="Ej: EV6, CBR500..." autocomplete="off">
+      </div>
+      <div class="field">
+        <label>Ciudad</label>
+        <input type="text" id="ciudad" placeholder="Ej: MADRID..." autocomplete="off">
+      </div>
+      <div class="field">
+        <label>Provincia</label>
+        <select id="provincia">
+          <option value="">Todas</option>
+          {% for p in provincias %}
+          <option value="{{ p }}">{{ p }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="field">
+        <label>Tipo de vehículo</label>
+        <select id="tipo">
+          <option value="">Todos</option>
+          {% for t in tipos %}
+          <option value="{{ t }}">{{ t }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="field">
+        <label>Propulsión</label>
+        <select id="propulsion">
+          <option value="">Todas</option>
+          {% for p in propulsiones %}
+          <option value="{{ p }}">{{ p }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="field">
+        <label>Persona</label>
+        <select id="persona">
+          <option value="">Todas</option>
+          <option value="Física">Física</option>
+          <option value="Jurídica">Jurídica</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Renting</label>
+        <select id="renting">
+          <option value="">Todos</option>
+          <option value="Sí">Sí</option>
+          <option value="No">No</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="divider"></div>
+    <h2>Período</h2>
+
+    <div class="grid-dates">
+      <div class="field">
+        <label>Año desde</label>
+        <select id="anio_desde">
+          {% for a in range(2014, anio_actual + 1) %}
+          <option value="{{ a }}" {% if a == anio_actual - 1 %}selected{% endif %}>{{ a }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="field">
+        <label>Mes desde</label>
+        <select id="mes_desde">
+          {% for m in range(1, 13) %}
+          <option value="{{ m }}">{{ ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"][m-1] }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="field">
+        <label>Año hasta</label>
+        <select id="anio_hasta">
+          {% for a in range(2014, anio_actual + 1) %}
+          <option value="{{ a }}" {% if a == anio_actual %}selected{% endif %}>{{ a }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="field">
+        <label>Mes hasta</label>
+        <select id="mes_hasta">
+          {% for m in range(1, 13) %}
+          <option value="{{ m }}" {% if m == 12 %}selected{% endif %}>{{ ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"][m-1] }}</option>
+          {% endfor %}
+        </select>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button class="btn btn-primary" id="btnBuscar" onclick="buscar()">Buscar</button>
+      <button class="btn btn-secondary" onclick="limpiar()">Limpiar filtros</button>
+    </div>
+  </div>
+
+  <div id="estado">
+    <div class="spinner"></div>
+    <span id="estado-texto">Consultando datos de la DGT...</span>
+  </div>
+
+  <div id="error-msg"></div>
+
+  <div id="resultados">
+    <div class="stats-row">
+      <div class="stat-box">
+        <div class="val" id="stat-total">0</div>
+        <div class="lbl">Matriculaciones</div>
+      </div>
+      <div class="stat-box">
+        <div class="val" id="stat-modelos">0</div>
+        <div class="lbl">Modelos distintos</div>
+      </div>
+      <div class="stat-box">
+        <div class="val" id="stat-meses">0</div>
+        <div class="lbl">Meses consultados</div>
+      </div>
+    </div>
+
+    <div class="results-card" id="card-resumen">
+      <h3>Resumen por modelo y año</h3>
+      <div class="table-wrap">
+        <table id="tabla-resumen"></table>
+      </div>
+    </div>
+
+    <div class="results-card" id="card-detalle">
+      <h3>Detalle de registros</h3>
+      <div class="table-wrap">
+        <table id="tabla-detalle">
+          <thead>
+            <tr>
+              <th>Año</th><th>Mes</th><th>Marca</th><th>Modelo</th>
+              <th>Tipo</th><th>Propulsión</th><th>cc</th>
+              <th>Ciudad</th><th>Provincia</th><th>Persona</th><th>Renting</th>
+            </tr>
+          </thead>
+          <tbody id="tbody-detalle"></tbody>
+        </table>
+      </div>
+      <p class="nota" id="nota-limite" style="display:none">⚠ Se muestran los primeros 500 registros. Usa filtros más específicos para ver todos.</p>
+    </div>
+  </div>
+
+</main>
+
+<script>
+async function buscar() {
+  const btn = document.getElementById('btnBuscar');
+  btn.disabled = true;
+
+  document.getElementById('estado').classList.add('visible');
+  document.getElementById('resultados').classList.remove('visible');
+  document.getElementById('error-msg').classList.remove('visible');
+
+  const payload = {
+    marca:      document.getElementById('marca').value,
+    modelo:     document.getElementById('modelo').value,
+    ciudad:     document.getElementById('ciudad').value,
+    provincia:  document.getElementById('provincia').value,
+    tipo:       document.getElementById('tipo').value,
+    propulsion: document.getElementById('propulsion').value,
+    persona:    document.getElementById('persona').value,
+    renting:    document.getElementById('renting').value,
+    anio_desde: document.getElementById('anio_desde').value,
+    anio_hasta: document.getElementById('anio_hasta').value,
+    mes_desde:  document.getElementById('mes_desde').value,
+    mes_hasta:  document.getElementById('mes_hasta').value,
+  };
+
+  try {
+    const res  = await fetch('/consulta', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+
+    document.getElementById('estado').classList.remove('visible');
+
+    if (data.total === 0) {
+      const err = document.getElementById('error-msg');
+      err.textContent = 'No se encontraron matriculaciones con los filtros seleccionados. Prueba a ampliar el rango de fechas o quitar algún filtro.';
+      err.classList.add('visible');
+    } else {
+      mostrarResultados(data);
+    }
+  } catch(e) {
+    document.getElementById('estado').classList.remove('visible');
+    const err = document.getElementById('error-msg');
+    err.textContent = 'Error al conectar con la DGT. Inténtalo de nuevo en unos segundos.';
+    err.classList.add('visible');
+  }
+
+  btn.disabled = false;
+}
+
+function mostrarResultados(data) {
+  document.getElementById('stat-total').textContent   = data.total.toLocaleString('es');
+  document.getElementById('stat-modelos').textContent = data.resumen.length;
+  document.getElementById('stat-meses').textContent   = data.meses_procesados;
+
+  // Tabla resumen
+  const anios = data.anios;
+  let thHtml = '<thead><tr><th>Modelo</th>';
+  anios.forEach(a => thHtml += `<th>${a}</th>`);
+  thHtml += '<th>Total</th></tr></thead>';
+
+  let tbHtml = '<tbody>';
+  data.resumen.forEach(row => {
+    tbHtml += `<tr><td>${row.modelo}</td>`;
+    anios.forEach(a => tbHtml += `<td class="num">${row.totales[a] || '-'}</td>`);
+    tbHtml += `<td class="num">${row.total}</td></tr>`;
+  });
+  tbHtml += '</tbody>';
+  document.getElementById('tabla-resumen').innerHTML = thHtml + tbHtml;
+
+  // Tabla detalle
+  const tbody = document.getElementById('tbody-detalle');
+  tbody.innerHTML = '';
+  data.registros.forEach(r => {
+    const pBadge  = r.persona  === 'Física'   ? 'badge-fisica'  : r.persona === 'Jurídica' ? 'badge-juridica' : '';
+    const reBadge = r.renting  === 'Sí'       ? 'badge-si'      : 'badge-no';
+    tbody.innerHTML += `<tr>
+      <td>${r.anio}</td><td>${r.mes}</td>
+      <td><strong>${r.marca}</strong></td><td>${r.modelo}</td>
+      <td>${r.tipo}</td><td>${r.propulsion}</td><td class="num">${r.cilindrada}</td>
+      <td>${r.ciudad}</td><td>${r.provincia}</td>
+      <td><span class="badge ${pBadge}">${r.persona}</span></td>
+      <td><span class="badge ${reBadge}">${r.renting}</span></td>
+    </tr>`;
+  });
+
+  document.getElementById('nota-limite').style.display = data.total > 500 ? 'block' : 'none';
+  document.getElementById('resultados').classList.add('visible');
+}
+
+function limpiar() {
+  ['marca','modelo','ciudad'].forEach(id => document.getElementById(id).value = '');
+  ['provincia','tipo','propulsion','persona','renting'].forEach(id => document.getElementById(id).value = '');
+  document.getElementById('resultados').classList.remove('visible');
+  document.getElementById('error-msg').classList.remove('visible');
+}
+</script>
+</body>
+</html>
