@@ -183,19 +183,24 @@ def consulta():
                 if mes_ya_cargado(anio, mes):
                     yield f"data: {json.dumps({'tipo':'progreso','texto':f'{MESES[mes]} {anio}: ya guardado ✓'})}\n\n"
                     continue
-                yield f"data: {json.dumps({'tipo':'progreso','texto':f'Descargando {MESES[mes]} {anio}...'})}\n\n"
-                try:
-                    r = requests.get(BASE_URL.format(a=anio, m=mes), timeout=55)
-                    if r.status_code != 200:
-                        yield f"data: {json.dumps({'tipo':'progreso','texto':f'{MESES[mes]} {anio}: no disponible'})}\n\n"
-                        continue
-                    with zipfile.ZipFile(io.BytesIO(r.content)) as z:
-                        contenido = z.read(z.namelist()[0])
-                    registros = procesar_zip(contenido, anio, mes)
-                    guardar_registros(registros)
-                    yield f"data: {json.dumps({'tipo':'progreso','texto':f'{MESES[mes]} {anio}: {len(registros):,} registros guardados ✓'})}\n\n"
-                except Exception:
-                    yield f"data: {json.dumps({'tipo':'progreso','texto':f'Error en {MESES[mes]} {anio}'})}\n\n"
+                yield f"data: {json.dumps({'tipo':'progreso','texto':f'Descargando {MESES[mes]} {anio}...'})}" + "\n\n"
+                for intento in range(3):
+                    try:
+                        if intento > 0:
+                            yield f"data: {json.dumps({'tipo':'progreso','texto':f'Reintentando {MESES[mes]} {anio} ({intento+1}/3)...'})}" + "\n\n"
+                        r = requests.get(BASE_URL.format(a=anio, m=mes), timeout=120)
+                        if r.status_code != 200:
+                            yield f"data: {json.dumps({'tipo':'progreso','texto':f'{MESES[mes]} {anio}: no disponible'})}" + "\n\n"
+                            break
+                        with zipfile.ZipFile(io.BytesIO(r.content)) as z:
+                            contenido = z.read(z.namelist()[0])
+                        registros = procesar_zip(contenido, anio, mes)
+                        guardar_registros(registros)
+                        yield f"data: {json.dumps({'tipo':'progreso','texto':f'{MESES[mes]} {anio}: {len(registros):,} registros guardados'})}" + "\n\n"
+                        break
+                    except Exception:
+                        if intento == 2:
+                            yield f"data: {json.dumps({'tipo':'progreso','texto':f'{MESES[mes]} {anio}: omitido tras 3 intentos'})}" + "\n\n"
 
         # Consultar BD con filtros
         yield f"data: {json.dumps({'tipo':'progreso','texto':'Consultando base de datos...'})}\n\n"
