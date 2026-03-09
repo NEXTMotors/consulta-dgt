@@ -523,29 +523,39 @@ async function buscar() {
       body: JSON.stringify(payload)
     });
 
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
+    let receivedAny = false;
 
     while (true) {
       const {done, value} = await reader.read();
       if (done) break;
 
+      receivedAny = true;
       buffer += decoder.decode(value, {stream: true});
-      const lines = buffer.split('\n');
-      buffer = lines.pop(); // guardar línea incompleta
 
-      for (const line of lines) {
+      let newlineIdx;
+      while ((newlineIdx = buffer.indexOf('\n')) !== -1) {
+        const line = buffer.slice(0, newlineIdx).trim();
+        buffer = buffer.slice(newlineIdx + 1);
         if (!line.startsWith('data: ')) continue;
         try {
           const msg = JSON.parse(line.slice(6));
           if (msg.tipo === 'progreso') {
             document.getElementById('estado-texto').textContent = msg.texto;
+          } else if (msg.tipo === 'error') {
+            document.getElementById('estado').classList.remove('visible');
+            const err = document.getElementById('error-msg');
+            err.textContent = msg.texto;
+            err.classList.add('visible');
           } else if (msg.tipo === 'resultado') {
             document.getElementById('estado').classList.remove('visible');
             if (msg.total === 0) {
               const err = document.getElementById('error-msg');
-              err.textContent = 'No se encontraron matriculaciones con los filtros seleccionados. Prueba a ampliar el rango de fechas o quitar algún filtro.';
+              err.textContent = 'No se encontraron matriculaciones con los filtros seleccionados.';
               err.classList.add('visible');
             } else {
               mostrarResultados(msg);
@@ -554,10 +564,13 @@ async function buscar() {
         } catch(e) {}
       }
     }
+
+    if (!receivedAny) throw new Error('Sin respuesta del servidor');
+
   } catch(e) {
     document.getElementById('estado').classList.remove('visible');
     const err = document.getElementById('error-msg');
-    err.textContent = 'Error al conectar con la DGT. Inténtalo de nuevo en unos segundos.';
+    err.textContent = 'Error: ' + e.message + '. Inténtalo de nuevo.';
     err.classList.add('visible');
   }
 
