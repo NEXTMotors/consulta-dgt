@@ -499,6 +499,7 @@ async function buscar() {
   document.getElementById('estado').classList.add('visible');
   document.getElementById('resultados').classList.remove('visible');
   document.getElementById('error-msg').classList.remove('visible');
+  document.getElementById('estado-texto').textContent = 'Iniciando consulta...';
 
   const payload = {
     marca:      document.getElementById('marca').value,
@@ -516,21 +517,42 @@ async function buscar() {
   };
 
   try {
-    const res  = await fetch('/consulta', {
+    const res = await fetch('/consulta', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify(payload)
     });
-    const data = await res.json();
 
-    document.getElementById('estado').classList.remove('visible');
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
 
-    if (data.total === 0) {
-      const err = document.getElementById('error-msg');
-      err.textContent = 'No se encontraron matriculaciones con los filtros seleccionados. Prueba a ampliar el rango de fechas o quitar algún filtro.';
-      err.classList.add('visible');
-    } else {
-      mostrarResultados(data);
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, {stream: true});
+      const lines = buffer.split('\n');
+      buffer = lines.pop(); // guardar línea incompleta
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        try {
+          const msg = JSON.parse(line.slice(6));
+          if (msg.tipo === 'progreso') {
+            document.getElementById('estado-texto').textContent = msg.texto;
+          } else if (msg.tipo === 'resultado') {
+            document.getElementById('estado').classList.remove('visible');
+            if (msg.total === 0) {
+              const err = document.getElementById('error-msg');
+              err.textContent = 'No se encontraron matriculaciones con los filtros seleccionados. Prueba a ampliar el rango de fechas o quitar algún filtro.';
+              err.classList.add('visible');
+            } else {
+              mostrarResultados(msg);
+            }
+          }
+        } catch(e) {}
+      }
     }
   } catch(e) {
     document.getElementById('estado').classList.remove('visible');

@@ -101,6 +101,17 @@ def index():
         anio_actual=__import__('datetime').datetime.now().year
     )
 
+@app.route("/test")
+def test():
+    url = BASE_URL.format(a=2025, m=1)
+    try:
+        r = requests.get(url, timeout=30, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        })
+        return jsonify({"status": r.status_code, "url": url, "size": len(r.content)})
+    except Exception as e:
+        return jsonify({"error": str(e), "url": url})
+
 @app.route("/marcas")
 def marcas():
     datos = cargar_marcas_modelos()
@@ -108,6 +119,9 @@ def marcas():
 
 @app.route("/consulta", methods=["POST"])
 def consulta():
+    from flask import Response, stream_with_context
+    import json
+
     data = request.json
     marca      = data.get("marca","").strip().upper()
     modelo     = data.get("modelo","").strip().upper()
@@ -125,78 +139,94 @@ def consulta():
     anio_hoy = datetime.now().year
     mes_hoy  = datetime.now().month
 
-    resultados = []
-    meses_procesados = 0
+    def generar():
+        resultados = []
+        meses_procesados = 0
 
-    for anio in range(anio_desde, anio_hasta + 1):
-        mes_max = 12 if anio < anio_hoy else mes_hoy - 1
-        m_ini = mes_desde if anio == anio_desde else 1
-        m_fin = min(mes_hasta, mes_max) if anio == anio_hasta else mes_max
+        for anio in range(anio_desde, anio_hasta + 1):
+            mes_max = 12 if anio < anio_hoy else mes_hoy - 1
+            m_ini = mes_desde if anio == anio_desde else 1
+            m_fin = min(mes_hasta, mes_max) if anio == anio_hasta else mes_max
 
-        for mes in range(m_ini, m_fin + 1):
-            try:
-                r = requests.get(BASE_URL.format(a=anio, m=mes), timeout=30)
-                if r.status_code != 200:
+            for mes in range(m_ini, m_fin + 1):
+                # Notificar progreso al navegador
+                yield f"data: {json.dumps({'tipo': 'progreso', 'texto': f'Descargando {MESES[mes]} {anio}...'})}\n\n"
+
+                try:
+                    r = requests.get(BASE_URL.format(a=anio, m=mes), timeout=55)
+                    if r.status_code != 200:
+                        yield f"data: {json.dumps({'tipo': 'progreso', 'texto': f'{MESES[mes]} {anio}: no disponible'})}\n\n"
+                        continue
+                    with zipfile.ZipFile(io.BytesIO(r.content)) as z:
+                        contenido = z.read(z.namelist()[0])
+
+                    encontrados = 0
+                    for linea in contenido.decode("latin1").split("\n"):
+                        if len(linea) < 285:
+                            continue
+                        m_val = leer_campo(linea, "marca")
+                        if not m_val:
+                            continue
+                        mo_val = leer_campo(linea, "modelo")
+                        ti_val = COD_TIPO.get(leer_campo(linea, "cod_tipo"), "Desconocido")
+                        pr_val = COD_PROP.get(leer_campo(linea, "prop"), "Desconocido")
+                        ci_raw = leer_campo(linea, "cil")
+                        lo_val = leer_campo(linea, "localidad")
+                        pv_val = COD_PROVINCIA.get(leer_campo(linea, "prov"), "Desconocido")
+                        pe_raw = leer_campo(linea, "persona")
+                        re_raw = leer_campo(linea, "renting")
+
+                        pe_val = "Física" if pe_raw == "D" else "Jurídica" if pe_raw == "X" else ""
+                        re_val = "Sí" if re_raw == "S" else "No"
+                        cil    = int(ci_raw) if ci_raw.isdigit() else 0
+
+                        if marca      and marca      not in m_val.upper():   continue
+                        if modelo     and modelo     not in mo_val.upper():  continue
+                        if ciudad     and ciudad     not in lo_val.upper():  continue
+                        if provincia  and provincia  != pv_val:              continue
+                        if tipo       and tipo       != ti_val:              continue
+                        if propulsion and propulsion != pr_val:              continue
+                        if persona    and persona    != pe_val:              continue
+                        if renting    and renting    != re_val:              continue
+
+                        resultados.append({
+                            "anio": anio, "mes": MESES[mes],
+                            "marca": m_val, "modelo": mo_val,
+                            "tipo": ti_val, "propulsion": pr_val,
+                            "cilindrada": cil if cil > 0 else "-",
+                            "ciudad": lo_val, "provincia": pv_val,
+                            "persona": pe_val, "renting": re_val,
+                        })
+                        encontrados += 1
+
+                    meses_procesados += 1
+                    yield f"data: {json.dumps({'tipo': 'progreso', 'texto': f'{MESES[mes]} {anio}: {encontrados} registros'})}\n\n"
+
+                except Exception as e:
+                    yield f"data: {json.dumps({'tipo': 'progreso', 'texto': f'Error en {MESES[mes]} {anio}'})}\n\n"
                     continue
-                with zipfile.ZipFile(io.BytesIO(r.content)) as z:
-                    contenido = z.read(z.namelist()[0])
-                for linea in contenido.decode("latin1").split("\n"):
-                    if len(linea) < 285:
-                        continue
-                    m_val  = leer_campo(linea, "marca")
-                    if not m_val:
-                        continue
-                    mo_val = leer_campo(linea, "modelo")
-                    ti_val = COD_TIPO.get(leer_campo(linea, "cod_tipo"), "Desconocido")
-                    pr_val = COD_PROP.get(leer_campo(linea, "prop"), "Desconocido")
-                    ci_raw = leer_campo(linea, "cil")
-                    lo_val = leer_campo(linea, "localidad")
-                    pv_val = COD_PROVINCIA.get(leer_campo(linea, "prov"), "Desconocido")
-                    pe_raw = leer_campo(linea, "persona")
-                    re_raw = leer_campo(linea, "renting")
 
-                    pe_val = "Física" if pe_raw == "D" else "Jurídica" if pe_raw == "X" else ""
-                    re_val = "Sí" if re_raw == "S" else "No"
-                    cil    = int(ci_raw) if ci_raw.isdigit() else 0
+        # Enviar resultado final
+        resumen = defaultdict(lambda: defaultdict(int))
+        for reg in resultados:
+            resumen[f"{reg['marca']} {reg['modelo']}".strip()][reg['anio']] += 1
 
-                    if marca      and marca      not in m_val.upper():   continue
-                    if modelo     and modelo     not in mo_val.upper():  continue
-                    if ciudad     and ciudad     not in lo_val.upper():  continue
-                    if provincia  and provincia  != pv_val:              continue
-                    if tipo       and tipo       != ti_val:              continue
-                    if propulsion and propulsion != pr_val:              continue
-                    if persona    and persona    != pe_val:              continue
-                    if renting    and renting    != re_val:              continue
+        anios = sorted(set(r['anio'] for r in resultados)) if resultados else []
 
-                    resultados.append({
-                        "anio": anio, "mes": MESES[mes],
-                        "marca": m_val, "modelo": mo_val,
-                        "tipo": ti_val, "propulsion": pr_val,
-                        "cilindrada": cil if cil > 0 else "-",
-                        "ciudad": lo_val, "provincia": pv_val,
-                        "persona": pe_val, "renting": re_val,
-                    })
-                meses_procesados += 1
-            except Exception:
-                continue
+        resultado_final = {
+            "tipo": "resultado",
+            "total": len(resultados),
+            "meses_procesados": meses_procesados,
+            "anios": anios,
+            "resumen": [
+                {"modelo": k, "totales": dict(v), "total": sum(v.values())}
+                for k, v in sorted(resumen.items(), key=lambda x: sum(x[1].values()), reverse=True)
+            ],
+            "registros": resultados[:500]
+        }
+        yield f"data: {json.dumps(resultado_final)}\n\n"
 
-    # Resumen por modelo y año
-    resumen = defaultdict(lambda: defaultdict(int))
-    for reg in resultados:
-        resumen[f"{reg['marca']} {reg['modelo']}".strip()][reg['anio']] += 1
-
-    anios = sorted(set(r['anio'] for r in resultados)) if resultados else []
-
-    return jsonify({
-        "total": len(resultados),
-        "meses_procesados": meses_procesados,
-        "anios": anios,
-        "resumen": [
-            {"modelo": k, "totales": dict(v), "total": sum(v.values())}
-            for k, v in sorted(resumen.items(), key=lambda x: sum(x[1].values()), reverse=True)
-        ],
-        "registros": resultados[:500]  # máximo 500 filas en tabla
-    })
+    return Response(stream_with_context(generar()), mimetype="text/event-stream")
 
 if __name__ == "__main__":
     app.run(debug=True)
