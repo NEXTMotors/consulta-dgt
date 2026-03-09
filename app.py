@@ -1,52 +1,56 @@
 from flask import Flask, render_template, request, jsonify, Response, stream_with_context
-import requests, zipfile, io, os, json
+import requests, zipfile, io, os, json, re
 from collections import defaultdict
 from datetime import datetime
-import psycopg2, psycopg2.extras
+import pg8000.native
 
 app = Flask(__name__)
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
 def get_db():
-    return psycopg2.connect(DATABASE_URL)
+    m = re.match(r"postgresql://([^:]+):([^@]+)@([^:/]+):(\d+)/(.+)", DATABASE_URL)
+    user, password, host, port, database = m.groups()
+    return pg8000.native.Connection(
+        user=user, password=password, host=host,
+        port=int(port), database=database, ssl_context=True
+    )
 
 def init_db():
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS matriculaciones (
-                    id SERIAL PRIMARY KEY,
-                    anio INTEGER, mes INTEGER,
-                    marca TEXT, modelo TEXT, tipo TEXT,
-                    propulsion TEXT, cilindrada INTEGER,
-                    ciudad TEXT, provincia TEXT,
-                    persona TEXT, renting TEXT
-                );
-                CREATE INDEX IF NOT EXISTS idx_marca    ON matriculaciones(marca);
-                CREATE INDEX IF NOT EXISTS idx_anio_mes ON matriculaciones(anio, mes);
-            """)
-            conn.commit()
+    conn = get_db()
+    conn.run("""
+        CREATE TABLE IF NOT EXISTS matriculaciones (
+            id SERIAL PRIMARY KEY,
+            anio INTEGER, mes INTEGER,
+            marca TEXT, modelo TEXT, tipo TEXT,
+            propulsion TEXT, cilindrada INTEGER,
+            ciudad TEXT, provincia TEXT,
+            persona TEXT, renting TEXT
+        )
+    """)
+    conn.run("CREATE INDEX IF NOT EXISTS idx_marca ON matriculaciones(marca)")
+    conn.run("CREATE INDEX IF NOT EXISTS idx_anio_mes ON matriculaciones(anio, mes)")
+    conn.close()
 
 def mes_ya_cargado(anio, mes):
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) FROM matriculaciones WHERE anio=%s AND mes=%s", (anio, mes))
-            return cur.fetchone()[0] > 0
+    conn = get_db()
+    result = conn.run("SELECT COUNT(*) FROM matriculaciones WHERE anio=:a AND mes=:m", a=anio, m=mes)
+    conn.close()
+    return result[0][0] > 0
 
 def guardar_registros(registros):
     if not registros:
         return
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            psycopg2.extras.execute_values(cur, """
-                INSERT INTO matriculaciones
-                (anio, mes, marca, modelo, tipo, propulsion, cilindrada, ciudad, provincia, persona, renting)
-                VALUES %s
-            """, [(r['anio_num'], r['mes_num'], r['marca'], r['modelo'], r['tipo'],
-                   r['propulsion'], r['cilindrada'], r['ciudad'], r['provincia'],
-                   r['persona'], r['renting']) for r in registros])
-            conn.commit()
+    conn = get_db()
+    for r in registros:
+        conn.run("""
+            INSERT INTO matriculaciones
+            (anio, mes, marca, modelo, tipo, propulsion, cilindrada, ciudad, provincia, persona, renting)
+            VALUES (:anio,:mes,:marca,:modelo,:tipo,:prop,:cil,:ciudad,:prov,:persona,:renting)
+        """, anio=r['anio_num'], mes=r['mes_num'], marca=r['marca'], modelo=r['modelo'],
+            tipo=r['tipo'], prop=r['propulsion'], cil=r['cilindrada'],
+            ciudad=r['ciudad'], prov=r['provincia'], persona=r['persona'], renting=r['renting'])
+    conn.close()
 
 _cache_marcas = None
 _cache_fecha  = None
@@ -57,10 +61,9 @@ def cargar_marcas_modelos():
     if _cache_marcas and _cache_fecha == hoy:
         return _cache_marcas
     try:
-        with get_db() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT DISTINCT marca, modelo FROM matriculaciones ORDER BY marca, modelo")
-                rows = cur.fetchall()
+        conn = get_db()
+        rows = conn.run("SELECT DISTINCT marca, modelo FROM matriculaciones ORDER BY marca, modelo")
+        conn.close()
         result = defaultdict(list)
         for marca, modelo in rows:
             if modelo:
@@ -174,7 +177,7 @@ def consulta():
     mes_hoy    = datetime.now().month
 
     def generar():
-        # Descargar meses que no están en la BD
+        # Descargar meses que faltan en la BD
         for anio in range(anio_desde, anio_hasta + 1):
             mes_max = 12 if anio < anio_hoy else mes_hoy - 1
             m_ini = mes_desde if anio == anio_desde else 1
@@ -183,51 +186,68 @@ def consulta():
                 if mes_ya_cargado(anio, mes):
                     yield f"data: {json.dumps({'tipo':'progreso','texto':f'{MESES[mes]} {anio}: ya guardado ✓'})}\n\n"
                     continue
-                yield f"data: {json.dumps({'tipo':'progreso','texto':f'Descargando {MESES[mes]} {anio}...'})}" + "\n\n"
+                yield f"data: {json.dumps({'tipo':'progreso','texto':f'Descargando {MESES[mes]} {anio}...'})}\n\n"
                 for intento in range(3):
                     try:
                         if intento > 0:
-                            yield f"data: {json.dumps({'tipo':'progreso','texto':f'Reintentando {MESES[mes]} {anio} ({intento+1}/3)...'})}" + "\n\n"
+                            yield f"data: {json.dumps({'tipo':'progreso','texto':f'Reintentando {MESES[mes]} {anio} ({intento+1}/3)...'})}\n\n"
                         r = requests.get(BASE_URL.format(a=anio, m=mes), timeout=120)
                         if r.status_code != 200:
-                            yield f"data: {json.dumps({'tipo':'progreso','texto':f'{MESES[mes]} {anio}: no disponible'})}" + "\n\n"
+                            yield f"data: {json.dumps({'tipo':'progreso','texto':f'{MESES[mes]} {anio}: no disponible'})}\n\n"
                             break
                         with zipfile.ZipFile(io.BytesIO(r.content)) as z:
                             contenido = z.read(z.namelist()[0])
                         registros = procesar_zip(contenido, anio, mes)
                         guardar_registros(registros)
-                        yield f"data: {json.dumps({'tipo':'progreso','texto':f'{MESES[mes]} {anio}: {len(registros):,} registros guardados'})}" + "\n\n"
+                        yield f"data: {json.dumps({'tipo':'progreso','texto':f'{MESES[mes]} {anio}: {len(registros):,} registros guardados ✓'})}\n\n"
                         break
                     except Exception:
                         if intento == 2:
-                            yield f"data: {json.dumps({'tipo':'progreso','texto':f'{MESES[mes]} {anio}: omitido tras 3 intentos'})}" + "\n\n"
+                            yield f"data: {json.dumps({'tipo':'progreso','texto':f'{MESES[mes]} {anio}: omitido tras 3 intentos'})}\n\n"
 
-        # Consultar BD con filtros
+        # Consultar BD
         yield f"data: {json.dumps({'tipo':'progreso','texto':'Consultando base de datos...'})}\n\n"
         try:
-            conditions = ["anio BETWEEN %s AND %s", "mes BETWEEN %s AND %s"]
-            params     = [anio_desde, anio_hasta, mes_desde, mes_hasta]
-            if marca:      conditions.append("UPPER(marca) LIKE %s");     params.append(f"%{marca}%")
-            if modelo:     conditions.append("UPPER(modelo) LIKE %s");    params.append(f"%{modelo}%")
-            if ciudad:     conditions.append("UPPER(ciudad) LIKE %s");    params.append(f"%{ciudad}%")
-            if provincia:  conditions.append("provincia = %s");           params.append(provincia)
-            if tipo:       conditions.append("tipo = %s");                params.append(tipo)
-            if propulsion: conditions.append("propulsion = %s");          params.append(propulsion)
-            if persona:    conditions.append("persona = %s");             params.append(persona)
-            if renting:    conditions.append("renting = %s");             params.append(renting)
+            conditions = ["anio BETWEEN :ad AND :ah", "mes BETWEEN :md AND :mh"]
+            params = {"ad": anio_desde, "ah": anio_hasta, "md": mes_desde, "mh": mes_hasta}
+
+            if marca:
+                conditions.append("UPPER(marca) LIKE :marca")
+                params["marca"] = f"%{marca}%"
+            if modelo:
+                conditions.append("UPPER(modelo) LIKE :modelo")
+                params["modelo"] = f"%{modelo}%"
+            if ciudad:
+                conditions.append("UPPER(ciudad) LIKE :ciudad")
+                params["ciudad"] = f"%{ciudad}%"
+            if provincia:
+                conditions.append("provincia = :provincia")
+                params["provincia"] = provincia
+            if tipo:
+                conditions.append("tipo = :tipo")
+                params["tipo"] = tipo
+            if propulsion:
+                conditions.append("propulsion = :propulsion")
+                params["propulsion"] = propulsion
+            if persona:
+                conditions.append("persona = :persona")
+                params["persona"] = persona
+            if renting:
+                conditions.append("renting = :renting")
+                params["renting"] = renting
 
             where = " AND ".join(conditions)
-            with get_db() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(f"SELECT COUNT(*) FROM matriculaciones WHERE {where}", params)
-                    total = cur.fetchone()[0]
-                    cur.execute(f"""
-                        SELECT anio, mes, marca, modelo, tipo, propulsion,
-                               cilindrada, ciudad, provincia, persona, renting
-                        FROM matriculaciones WHERE {where}
-                        ORDER BY anio, mes LIMIT 500
-                    """, params)
-                    rows = cur.fetchall()
+
+            conn = get_db()
+            total_rows = conn.run(f"SELECT COUNT(*) FROM matriculaciones WHERE {where}", **params)
+            total = total_rows[0][0]
+            rows = conn.run(f"""
+                SELECT anio, mes, marca, modelo, tipo, propulsion,
+                       cilindrada, ciudad, provincia, persona, renting
+                FROM matriculaciones WHERE {where}
+                ORDER BY anio, mes LIMIT 500
+            """, **params)
+            conn.close()
 
             resultados = [{
                 "anio": r[0], "mes": MESES[r[1]],
