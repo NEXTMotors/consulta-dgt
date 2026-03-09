@@ -306,11 +306,15 @@
     <div class="grid">
       <div class="field">
         <label>Marca</label>
-        <input type="text" id="marca" placeholder="Ej: NEXT, HONDA..." autocomplete="off">
+        <select id="marca" onchange="actualizarModelos()">
+          <option value="">Cargando marcas...</option>
+        </select>
       </div>
       <div class="field">
         <label>Modelo</label>
-        <input type="text" id="modelo" placeholder="Ej: EV6, CBR500..." autocomplete="off">
+        <select id="modelo" disabled>
+          <option value="">Selecciona una marca primero</option>
+        </select>
       </div>
       <div class="field">
         <label>Ciudad</label>
@@ -456,6 +460,38 @@
 </main>
 
 <script>
+// Cargar marcas al iniciar
+let marcasData = {};
+async function cargarMarcas() {
+  const sel = document.getElementById('marca');
+  try {
+    const res  = await fetch('/marcas');
+    marcasData = await res.json();
+    sel.innerHTML = '<option value="">Todas las marcas</option>';
+    Object.keys(marcasData).forEach(m => {
+      sel.innerHTML += `<option value="${m}">${m}</option>`;
+    });
+  } catch(e) {
+    sel.innerHTML = '<option value="">Error al cargar marcas</option>';
+  }
+}
+
+function actualizarModelos() {
+  const marca  = document.getElementById('marca').value;
+  const selMod = document.getElementById('modelo');
+  selMod.innerHTML = '<option value="">Todos los modelos</option>';
+  if (marca && marcasData[marca]) {
+    marcasData[marca].forEach(m => {
+      if (m) selMod.innerHTML += `<option value="${m}">${m}</option>`;
+    });
+    selMod.disabled = false;
+  } else {
+    selMod.disabled = true;
+  }
+}
+
+cargarMarcas();
+
 async function buscar() {
   const btn = document.getElementById('btnBuscar');
   btn.disabled = true;
@@ -547,7 +583,9 @@ function mostrarResultados(data) {
 }
 
 function limpiar() {
-  ['marca','modelo','ciudad'].forEach(id => document.getElementById(id).value = '');
+  document.getElementById('marca').value = '';
+  actualizarModelos();
+  ['ciudad'].forEach(id => document.getElementById(id).value = '');
   ['provincia','tipo','propulsion','persona','renting'].forEach(id => document.getElementById(id).value = '');
   document.getElementById('resultados').classList.remove('visible');
   document.getElementById('error-msg').classList.remove('visible');
