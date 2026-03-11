@@ -476,17 +476,25 @@ async function cargarMarcas() {
   }
 }
 
-function actualizarModelos() {
+async function actualizarModelos() {
   const marca  = document.getElementById('marca').value;
   const selMod = document.getElementById('modelo');
-  selMod.innerHTML = '<option value="">Todos los modelos</option>';
-  if (marca && marcasData[marca]) {
-    marcasData[marca].forEach(m => {
+  selMod.innerHTML = '<option value="">Cargando modelos...</option>';
+  selMod.disabled = true;
+  if (!marca) {
+    selMod.innerHTML = '<option value="">Todos los modelos</option>';
+    return;
+  }
+  try {
+    const res = await fetch('/modelos?marca=' + encodeURIComponent(marca));
+    const modelos = await res.json();
+    selMod.innerHTML = '<option value="">Todos los modelos</option>';
+    modelos.forEach(m => {
       if (m) selMod.innerHTML += `<option value="${m}">${m}</option>`;
     });
     selMod.disabled = false;
-  } else {
-    selMod.disabled = true;
+  } catch(e) {
+    selMod.innerHTML = '<option value="">Error al cargar modelos</option>';
   }
 }
 
