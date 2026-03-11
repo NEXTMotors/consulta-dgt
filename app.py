@@ -130,15 +130,14 @@ def cargar_marcas_modelos():
     if _cache_marcas and _cache_fecha == hoy:
         return _cache_marcas
     try:
-        rows = sb_get("matriculaciones", {
-            "select": "marca,modelo",
-            "limit": "50000"
-        })
-        result = defaultdict(set)
-        for row in rows:
-            if row.get("marca") and row.get("modelo"):
-                result[row["marca"]].add(row["modelo"])
-        _cache_marcas = {m: sorted(modelos) for m, modelos in sorted(result.items())}
+        r = requests.post(
+            f"{SUPABASE_URL}/rest/v1/rpc/get_marcas_modelos",
+            headers={**sb_headers(), "Prefer": ""},
+            json={}, timeout=30
+        )
+        r.raise_for_status()
+        data = r.json()
+        _cache_marcas = {m: sorted(modelos) for m, modelos in sorted(data.items())} if data else {}
         _cache_fecha  = hoy
         return _cache_marcas
     except Exception:
