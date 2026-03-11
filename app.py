@@ -131,13 +131,16 @@ def cargar_marcas_modelos():
         return _cache_marcas
     try:
         r = requests.post(
-            f"{SUPABASE_URL}/rest/v1/rpc/get_marcas_modelos",
+            f"{SUPABASE_URL}/rest/v1/rpc/get_marcas",
             headers={**sb_headers(), "Prefer": ""},
             json={}, timeout=30
         )
         r.raise_for_status()
-        data = r.json()
-        _cache_marcas = {m: sorted(modelos) for m, modelos in sorted(data.items())} if data else {}
+        marcas = r.json()  # lista de marcas
+        if not marcas:
+            return {}
+        # Devolver dict marca -> [] (modelos se cargan bajo demanda)
+        _cache_marcas = {m: [] for m in sorted(marcas)}
         _cache_fecha  = hoy
         return _cache_marcas
     except Exception:
@@ -235,6 +238,22 @@ def test():
 @app.route("/marcas")
 def marcas():
     return jsonify(cargar_marcas_modelos())
+
+@app.route("/modelos")
+def modelos():
+    marca = request.args.get("marca", "").strip()
+    if not marca:
+        return jsonify([])
+    try:
+        r = requests.post(
+            f"{SUPABASE_URL}/rest/v1/rpc/get_modelos",
+            headers={**sb_headers(), "Prefer": ""},
+            json={"p_marca": marca}, timeout=15
+        )
+        r.raise_for_status()
+        return jsonify(r.json() or [])
+    except Exception:
+        return jsonify([])
 
 @app.route("/consulta", methods=["POST"])
 def consulta():
