@@ -36,7 +36,6 @@ def sb_rpc(func, params):
     return r.json()
 
 def init_db():
-    # Crear tabla via SQL usando la API de Supabase
     sql = """
     CREATE TABLE IF NOT EXISTS matriculaciones (
         id BIGSERIAL PRIMARY KEY,
@@ -49,7 +48,6 @@ def init_db():
     CREATE INDEX IF NOT EXISTS idx_marca ON matriculaciones(marca);
     CREATE INDEX IF NOT EXISTS idx_anio_mes ON matriculaciones(anio, mes);
     """
-    # Intentar via RPC exec_sql si existe, sino ignorar
     try:
         requests.post(f"{SUPABASE_URL}/rest/v1/rpc/exec_sql",
                       headers=sb_headers(), json={"sql": sql}, timeout=10)
@@ -69,7 +67,6 @@ def mes_ya_cargado(anio, mes):
 def guardar_registros(registros):
     if not registros:
         return
-    # Insertar en lotes de 500
     batch_size = 500
     for i in range(0, len(registros), batch_size):
         lote = registros[i:i+batch_size]
@@ -88,16 +85,6 @@ def guardar_registros(registros):
         )
 
 def consultar_bd(conditions_dict, anio_desde, anio_hasta, mes_desde, mes_hasta):
-    params = {
-        "anio": f"gte.{anio_desde}",
-        "mes":  f"gte.{mes_desde}",
-        "select": "*",
-        "order": "anio,mes",
-        "limit": "500"
-    }
-    params["anio"] = f"gte.{anio_desde}"
-
-    # Supabase REST no soporta BETWEEN directamente, usamos gte/lte
     base_params = [
         ("anio", f"gte.{anio_desde}"),
         ("anio", f"lte.{anio_hasta}"),
@@ -107,7 +94,6 @@ def consultar_bd(conditions_dict, anio_desde, anio_hasta, mes_desde, mes_hasta):
         ("order", "anio,mes"),
         ("limit", "500"),
     ]
-
     for key, val in conditions_dict.items():
         base_params.append((key, val))
 
@@ -119,32 +105,6 @@ def consultar_bd(conditions_dict, anio_desde, anio_hasta, mes_desde, mes_hasta):
     )
     total = int(r.headers.get("Content-Range", "0/0").split("/")[-1])
     return r.json(), total
-
-# ── Cache marcas ──────────────────────────────────────────────────────────────
-_cache_marcas = None
-_cache_fecha  = None
-
-def cargar_marcas_modelos():
-    global _cache_marcas, _cache_fecha
-    hoy = datetime.now().date()
-    if _cache_marcas and _cache_fecha == hoy:
-        return _cache_marcas
-    try:
-        r = requests.post(
-            f"{SUPABASE_URL}/rest/v1/rpc/get_marcas",
-            headers={**sb_headers(), "Prefer": ""},
-            json={}, timeout=30
-        )
-        r.raise_for_status()
-        marcas = r.json()  # lista de marcas
-        if not marcas:
-            return {}
-        # Devolver dict marca -> [] (modelos se cargan bajo demanda)
-        _cache_marcas = {m: [] for m in sorted(marcas)}
-        _cache_fecha  = hoy
-        return _cache_marcas
-    except Exception:
-        return {}
 
 # ── Tablas de códigos DGT ─────────────────────────────────────────────────────
 COD_PROP = {
@@ -243,7 +203,7 @@ def marcas():
             headers={**sb_headers(), "Prefer": ""},
             json={}, timeout=30
         )
-        raw = r.text[:500]  # primeros 500 chars
+        raw = r.text[:500]
         data = r.json()
         tipo = type(data).__name__
         longitud = len(data) if data else 0
@@ -286,7 +246,6 @@ def consulta():
     mes_hoy    = datetime.now().month
 
     def generar():
-        # Descargar meses que faltan
         for anio in range(anio_desde, anio_hasta + 1):
             mes_max = 12 if anio < anio_hoy else mes_hoy - 1
             m_ini = mes_desde if anio == anio_desde else 1
@@ -318,7 +277,6 @@ def consulta():
                         if intento == 2:
                             yield "data: " + json.dumps({"tipo":"progreso","texto":f"{MESES[mes]} {anio}: omitido ({str(e)[:50]})"}) + "\n\n"
 
-        # Consultar Supabase
         yield "data: " + json.dumps({"tipo":"progreso","texto":"Consultando base de datos..."}) + "\n\n"
         try:
             conditions = []
