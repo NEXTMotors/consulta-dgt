@@ -237,7 +237,19 @@ def test():
 
 @app.route("/marcas")
 def marcas():
-    return jsonify(cargar_marcas_modelos())
+    try:
+        r = requests.post(
+            f"{SUPABASE_URL}/rest/v1/rpc/get_marcas",
+            headers={**sb_headers(), "Prefer": ""},
+            json={}, timeout=30
+        )
+        raw = r.text[:500]  # primeros 500 chars
+        data = r.json()
+        tipo = type(data).__name__
+        longitud = len(data) if data else 0
+        return jsonify({"status": r.status_code, "tipo": tipo, "longitud": longitud, "muestra": raw})
+    except Exception as e:
+        return jsonify({"error": str(e)})
 
 @app.route("/modelos")
 def modelos():
